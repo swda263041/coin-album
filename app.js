@@ -898,12 +898,36 @@ function startSnapshot(uid){
   fbUnsub = () => { unsubCoins(); unsubDeleted(); };
 }
 
+function setSyncProgress(text, pct){
+  const box = $('#sync-progress');
+  const fill = $('#sync-progress-fill');
+  const txt = $('#sync-progress-text');
+  if (!box || !fill || !txt) return;
+  if (text === null){
+    box.classList.add('hidden');
+    return;
+  }
+  box.classList.remove('hidden');
+  txt.textContent = text;
+  if (pct == null){
+    fill.classList.add('pending');
+    fill.style.width = '100%';
+  } else {
+    fill.classList.remove('pending');
+    fill.style.width = Math.max(2, Math.min(100, Math.round(pct))) + '%';
+  }
+}
+
 async function syncNow(silent){
   if (!syncUser) return;
   if (syncBusy){ if (!silent) toast('同步進行中，請稍候'); return; }
   syncBusy = true;
+  const ui = !$('#sync-modal').classList.contains('hidden');
+  const t0 = Date.now();
+  const phase = (text, pct) => { if (ui) setSyncProgress(text, pct); };
   try {
     const uid = syncUser.uid;
+    phase('連線雲端中…', null);
     let cloud;
     if (coinsSnap && !coinsSnap.metadata.fromCache){
       cloud = coinsSnap.docs.map(d => d.data()).filter(c => c && c.id && c.name);
@@ -911,6 +935,7 @@ async function syncNow(silent){
       const cSnap = await fbFs.getDocs(fbFs.collection(fbDb, 'users', uid, 'coins'));
       cloud = cSnap.docs.map(d => d.data()).filter(c => c && c.id && c.name);
     }
+    phase('下載刪除紀錄…', null);
     let tombList;
     if (deletedSnap && !deletedSnap.metadata.fromCache){
       tombList = deletedSnap.docs.map(d => d.id);
@@ -919,30 +944,37 @@ async function syncNow(silent){
       tombList = dSnap.docs.map(d => d.id);
     }
     tombIds = new Set(tombList);
+    phase('比對變更…', null);
 
     const merged = mergeCoins(coins, cloud).filter(c => !tombIds.has(c.id));
     const pending = loadPendingDeletes();
     const toPush = diffCoinsForPush(merged, cloud, tombIds);
 
     if (pending.length || toPush.length){
+      const total = pending.length + toPush.length;
+      const byteLen = c => (c && c.front ? c.front.length : 0) + (c && c.back ? c.back.length : 0) + 600;
       let batch = fbFs.writeBatch(fbDb);
-      let ops = 0;
+      let ops = 0, bytes = 0, done = 0;
       const flush = async () => {
-        if (ops > 0) await batch.commit();
+        if (ops > 0){
+          await batch.commit();
+          done += ops;
+          phase('上傳變更 ' + done + ' / ' + total + '…', done / total * 100);
+        }
         batch = fbFs.writeBatch(fbDb);
-        ops = 0;
+        ops = 0; bytes = 0;
       };
       for (const id of pending){
         tombIds.add(id);
         batch.set(fbFs.doc(fbDb, 'users', uid, 'deleted', id), { id: id, at: new Date().toISOString() });
         batch.delete(fbFs.doc(fbDb, 'users', uid, 'coins', id));
-        ops++;
-        if (ops >= 400) await flush();
+        ops++; bytes += 400;
+        if (ops >= 400 || bytes >= 6000000) await flush();
       }
       for (const c of toPush){
         batch.set(fbFs.doc(fbDb, 'users', uid, 'coins', c.id), c);
-        ops++;
-        if (ops >= 400) await flush();
+        ops++; bytes += byteLen(c);
+        if (ops >= 400 || bytes >= 6000000) await flush();
       }
       await flush();
       if (pending.length){
@@ -954,7 +986,9 @@ async function syncNow(silent){
     saveCoins();
     render();
     startSnapshot(uid);
-    if (!silent) toast('同步完成，共 ' + coins.length + ' 枚');
+    phase('同步完成', 100);
+    if (ui) setTimeout(() => setSyncProgress(null), 1800);
+    if (!silent) toast('同步完成，共 ' + coins.length + ' 枚（' + ((Date.now() - t0) / 1000).toFixed(1) + ' 秒）');
   } finally {
     syncBusy = false;
   }

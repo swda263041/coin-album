@@ -281,6 +281,16 @@ input::placeholder,textarea::placeholder{color:#7a6b4d}
 #mini-map{height:240px;border-radius:14px;border:1px solid var(--line)}
 .pin-row{display:flex;align-items:center;justify-content:space-between;font-size:13px;color:var(--muted)}
 .sync-hint{font-size:13px;color:var(--muted);line-height:1.7;margin:0 0 16px}
+.sync-progress{display:flex;flex-direction:column;gap:8px;margin:0 0 16px}
+.sync-progress-track{height:10px;border-radius:999px;background:rgba(217,164,65,.14);overflow:hidden}
+#sync-progress-fill{
+  height:100%;width:0;border-radius:999px;
+  background:linear-gradient(90deg,#c69232,#e9c877);
+  transition:width .3s ease;
+}
+#sync-progress-fill.pending{animation:syncPulse 1.2s ease-in-out infinite}
+@keyframes syncPulse{0%,100%{opacity:.25}50%{opacity:1}}
+#sync-progress-text{font-size:12.5px;color:var(--gold-soft)}
 #login-form{display:flex;flex-direction:column;gap:13px}
 .modal-actions{display:flex;gap:10px;align-items:center;margin-top:8px}
 
