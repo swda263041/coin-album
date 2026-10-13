@@ -149,6 +149,22 @@ main{padding:18px 22px 60px}
   max-width:82%;text-align:center;line-height:1.7;
 }
 .leaflet-container{background:#0d0b06}
+#map .marker-cluster-small,
+#map .marker-cluster-medium,
+#map .marker-cluster-large {
+  background-color: rgba(217,164,65,.22);
+}
+#map .marker-cluster-small div,
+#map .marker-cluster-medium div,
+#map .marker-cluster-large div {
+  background: radial-gradient(circle at 35% 30%, #f0d48a, #c9992e);
+  box-shadow: 0 2px 10px rgba(0,0,0,.5), inset 0 0 0 2px rgba(240,220,150,.55);
+}
+#map .marker-cluster span {
+  color: #3a2a08;
+  font-weight: 800;
+  font-family: "Microsoft JhengHei","PingFang TC",system-ui,sans-serif;
+}
 .leaflet-control-attribution{background:rgba(22,18,9,.72)!important;color:#7a6b4d!important;font-size:10px!important}
 .leaflet-control-attribution a{color:#a49374!important}
 .leaflet-bar a{background:#241d11!important;color:#e9c877!important;border-color:rgba(217,164,65,.3)!important}

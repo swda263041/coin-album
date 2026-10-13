@@ -6,6 +6,8 @@
 <title>紀念幣蒐集冊</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%23d9a441'/%3E%3Ccircle cx='32' cy='32' r='23' fill='none' stroke='%238a6420' stroke-width='3'/%3E%3Cpath d='M20 42 L32 18 L44 42' stroke='%238a6420' stroke-width='4' fill='none'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -82,7 +84,7 @@
         <label>國家 / 地區 <input name="country" list="country-list" placeholder="例：台灣"></label>
         <label>取得日期 <input name="date" type="date"></label>
       </div>
-      <label>取得地點 <span class="hint">輸入關鍵字後按搜尋，會自動標記在地圖上</span>
+      <label>取得地點 <span class="hint">輸入關鍵字或貼上 Plus Code 後按搜尋；簡短代碼請在後面加城市，如 5WC5+W8 名古屋</span>
         <div class="search-row">
           <input name="location" id="location-input" placeholder="例：九份老街、京都 清水寺" autocomplete="off">
           <button type="button" id="btn-geocode" class="ghost">搜尋</button>
@@ -175,6 +177,7 @@
 <footer>資料儲存在此瀏覽器本機，清除瀏覽器資料會一併刪除蒐集紀錄</footer>
 
 <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <script src="sync-config.js"></script>
 <script src="app.js"></script>
 </body>

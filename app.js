@@ -169,8 +169,13 @@ function locateCurrent(){
   switchView('map');
   setTimeout(() => {
     if (!mainMap) return;
-    mainMap.setView([coin.lat, coin.lng], 13);
-    if (markers[coin.id]) markers[coin.id].openPopup();
+    const m = markers[coin.id];
+    if (!m) return;
+    if (mapLayer.zoomToShowLayer) mapLayer.zoomToShowLayer(m, () => m.openPopup());
+    else {
+      mainMap.setView([coin.lat, coin.lng], 13);
+      m.openPopup();
+    }
   }, 150);
 }
 
@@ -406,6 +411,82 @@ async function geocodeQuery(q){
   return [];
 }
 
+function parsePlusCodeInput(q){
+  const parts = String(q || '').trim().toUpperCase().split(/\s+/);
+  const s = parts[0];
+  if (!s || !/^[23456789CFGHJMPQRVWX+]+$/.test(s)) return null;
+  const rest = parts.slice(1).join(' ').trim();
+  if (s.indexOf('+') >= 0){
+    const m = s.match(/^([23456789CFGHJMPQRVWX]{2,8})\+([23456789CFGHJMPQRVWX]{0,2})$/);
+    if (m && m[1].length % 2 === 0 && m[2].length !== 1) return { pair: m[1], grid: m[2], rest: rest };
+    return null;
+  }
+  if (s.length >= 8 && s.length <= 10) return { pair: s.slice(0, 8), grid: s.slice(8), rest: rest };
+  return null;
+}
+
+function isSeaLabel(label){
+  return /\b(sea|ocean|bay|gulf|strait)\b|[海洋]/i.test(String(label || ''));
+}
+
+function decodePlusCode(pc, refLat, refLng){
+  const A = '23456789CFGHJMPQRVWX';
+  const isShort = pc.pair.length < 8;
+  const pair = isShort ? '2'.repeat(8 - pc.pair.length) + pc.pair : pc.pair;
+  let lat = -90, lng = -180;
+  let latRes = 20, lngRes = 20;
+  for (let i = 0; i < 8; i++){
+    const idx = A.indexOf(pair[i]);
+    if (idx < 0) return null;
+    if (i % 2 === 0){ lat += idx * latRes; latRes /= 20; }
+    else { lng += idx * lngRes; lngRes /= 20; }
+  }
+  if (isShort){
+    if (refLat == null || refLng == null) return null;
+    const S = Math.pow(20, pc.pair.length / 2 - 2);
+    while (lat - refLat > S / 2) lat -= S;
+    while (refLat - lat > S / 2) lat += S;
+    while (lng - refLng > S / 2) lng -= S;
+    while (refLng - lng > S / 2) lng += S;
+  }
+  let cellLat = 0.0025, cellLng = 0.0025;
+  for (let i = 0; i < pc.grid.length; i++){
+    const v = A.indexOf(pc.grid[i]);
+    if (v < 0) return null;
+    lat += Math.floor(v / 5) * cellLat / 4;
+    lng += (v % 5) * cellLng / 5;
+    cellLat /= 4;
+    cellLng /= 5;
+  }
+  lat += cellLat / 2;
+  lng += cellLng / 2;
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+  return { lat, lng };
+}
+
+async function reverseGeocodeLabel(lat, lng){
+  try {
+    const url = 'https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/reverseGeocode?f=json&location=' + encodeURIComponent(lng + ',' + lat);
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const a = data && data.address;
+    if (!a) return null;
+    return { label: a.Match_addr || a.LongLabel || '', country: a.CountryCode || '' };
+  } catch { return null; }
+}
+
+async function cityReference(q){
+  const providers = [photonGeocode, esriGeocode, nominatimGeocode];
+  for (const fn of providers){
+    try {
+      const list = await fn(q);
+      if (list.length) return list[0];
+    } catch {}
+  }
+  return null;
+}
+
 async function runGeocode(){
   if (geocodeBusy) return;
   const input = $('#location-input');
@@ -415,6 +496,57 @@ async function runGeocode(){
   const btn = $('#btn-geocode');
   btn.disabled = true;
   btn.textContent = '搜尋中…';
+  const pc = parsePlusCodeInput(q);
+  if (pc){
+    let ref = null;
+    let refSource = 'none';
+    if (pc.pair.length < 8){
+      if (pc.rest){
+        const refPoint = await cityReference(pc.rest);
+        if (refPoint){
+          ref = { lat: refPoint.lat, lng: refPoint.lng };
+          refSource = 'name';
+        }
+      }
+      if (!ref && miniMap){
+        ref = miniMap.getCenter();
+        refSource = 'map';
+      }
+    }
+    const decoded = decodePlusCode(pc, ref ? ref.lat : null, ref ? ref.lng : null);
+    if (!decoded){
+      btn.disabled = false;
+      btn.textContent = '搜尋';
+      geocodeBusy = false;
+      toast(pc.pair.length < 8 && refSource === 'none'
+        ? '簡短代碼需要城市參考：請在代碼後加上城市名，如 5WC5+W8 名古屋'
+        : 'Plus Code 無法辨識，請確認代碼是否完整');
+      return;
+    }
+    const addr = await reverseGeocodeLabel(decoded.lat, decoded.lng);
+    const label = (addr && addr.label) || q.toUpperCase().split(/\s+/)[0];
+    if (pc.pair.length < 8 && refSource === 'map' && isSeaLabel(label)){
+      btn.disabled = false;
+      btn.textContent = '搜尋';
+      geocodeBusy = false;
+      toast('推算結果落在海上：請在代碼後加上城市名（如 5WC5+W8 名古屋）或改用完整代碼');
+      return;
+    }
+    btn.disabled = false;
+    btn.textContent = '搜尋';
+    geocodeBusy = false;
+    applyGeocodeResult({
+      label: label,
+      lat: decoded.lat,
+      lng: decoded.lng,
+      country: (addr && addr.country) || ''
+    });
+    if (miniMap) miniMap.setView([decoded.lat, decoded.lng], 17);
+    toast(pc.pair.length === 8 ? '已標記 Plus Code 位置'
+      : (refSource === 'name' ? '已依城市推算簡短代碼並標記位置'
+      : '已標記（依地圖中心推算，若不對請在代碼後加城市名）'));
+    return;
+  }
   const list = await geocodeQuery(q);
   btn.disabled = false;
   btn.textContent = '搜尋';
@@ -492,7 +624,16 @@ function ensureMainMap(){
   }
   mainMap = L.map('map', { worldCopyJump: true }).setView([24.5, 121.5], 6);
   addTileLayer(mainMap);
-  mapLayer = L.layerGroup().addTo(mainMap);
+  if (typeof L.MarkerClusterGroup === 'function'){
+    mapLayer = L.markerClusterGroup({
+      showCoverageOnHover: false,
+      maxClusterRadius: 45,
+      spiderfyDistanceMultiplier: 1.2,
+      spiderLegPolylineOptions: { weight: 2, color: '#d9a441', opacity: 0.6 }
+    }).addTo(mainMap);
+  } else {
+    mapLayer = L.layerGroup().addTo(mainMap);
+  }
   renderMap();
 }
 function renderMap(){
