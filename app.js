@@ -22,6 +22,10 @@ let fbAuth = null;
 let fbFs = null;
 let fbDb = null;
 let fbUnsub = null;
+let snapUid = null;
+let coinsSnap = null;
+let deletedSnap = null;
+let syncBusy = false;
 let syncUser = null;
 let tombIds = new Set();
 
@@ -863,13 +867,31 @@ function applyCloudState(cloud){
   }
 }
 
+function coinStamp(c){
+  return String(c.updatedAt || c.createdAt || '');
+}
+
+function diffCoinsForPush(localCoins, cloudCoins, tombSet){
+  const byId = new Map((cloudCoins || []).map(c => [c.id, c]));
+  return (localCoins || []).filter(c => {
+    if (tombSet.has(c.id)) return false;
+    const remote = byId.get(c.id);
+    if (!remote) return true;
+    return coinStamp(remote) !== coinStamp(c);
+  });
+}
+
 function startSnapshot(uid){
+  if (fbUnsub && snapUid === uid) return;
   if (fbUnsub){ fbUnsub(); fbUnsub = null; }
+  snapUid = uid;
   const unsubCoins = fbFs.onSnapshot(fbFs.collection(fbDb, 'users', uid, 'coins'), snap => {
+    coinsSnap = snap;
     const cloud = snap.docs.map(d => d.data()).filter(c => c && c.id && c.name);
     applyCloudState(cloud);
   }, () => {});
   const unsubDeleted = fbFs.onSnapshot(fbFs.collection(fbDb, 'users', uid, 'deleted'), snap => {
+    deletedSnap = snap;
     tombIds = new Set(snap.docs.map(d => d.id));
     applyCloudState(null);
   }, () => {});
@@ -878,31 +900,64 @@ function startSnapshot(uid){
 
 async function syncNow(silent){
   if (!syncUser) return;
-  const uid = syncUser.uid;
-  const cSnap = await fbFs.getDocs(fbFs.collection(fbDb, 'users', uid, 'coins'));
-  const dSnap = await fbFs.getDocs(fbFs.collection(fbDb, 'users', uid, 'deleted'));
-  const cloud = cSnap.docs.map(d => d.data()).filter(c => c && c.id && c.name);
-  tombIds = new Set(dSnap.docs.map(d => d.id));
+  if (syncBusy){ if (!silent) toast('同步進行中，請稍候'); return; }
+  syncBusy = true;
+  try {
+    const uid = syncUser.uid;
+    let cloud;
+    if (coinsSnap && !coinsSnap.metadata.fromCache){
+      cloud = coinsSnap.docs.map(d => d.data()).filter(c => c && c.id && c.name);
+    } else {
+      const cSnap = await fbFs.getDocs(fbFs.collection(fbDb, 'users', uid, 'coins'));
+      cloud = cSnap.docs.map(d => d.data()).filter(c => c && c.id && c.name);
+    }
+    let tombList;
+    if (deletedSnap && !deletedSnap.metadata.fromCache){
+      tombList = deletedSnap.docs.map(d => d.id);
+    } else {
+      const dSnap = await fbFs.getDocs(fbFs.collection(fbDb, 'users', uid, 'deleted'));
+      tombList = dSnap.docs.map(d => d.id);
+    }
+    tombIds = new Set(tombList);
 
-  const pending = loadPendingDeletes();
-  for (const id of pending){
-    tombIds.add(id);
-    await fbFs.setDoc(fbFs.doc(fbDb, 'users', uid, 'deleted', id), { id: id, at: new Date().toISOString() });
-    await fbFs.deleteDoc(fbFs.doc(fbDb, 'users', uid, 'coins', id));
-  }
-  if (pending.length){
-    try { localStorage.removeItem(DELETED_KEY); } catch {}
-  }
+    const merged = mergeCoins(coins, cloud).filter(c => !tombIds.has(c.id));
+    const pending = loadPendingDeletes();
+    const toPush = diffCoinsForPush(merged, cloud, tombIds);
 
-  coins = mergeCoins(coins, cloud).filter(c => !tombIds.has(c.id));
-  for (const c of coins){
-    if (tombIds.has(c.id)) continue;
-    await fbFs.setDoc(fbFs.doc(fbDb, 'users', uid, 'coins', c.id), c);
+    if (pending.length || toPush.length){
+      let batch = fbFs.writeBatch(fbDb);
+      let ops = 0;
+      const flush = async () => {
+        if (ops > 0) await batch.commit();
+        batch = fbFs.writeBatch(fbDb);
+        ops = 0;
+      };
+      for (const id of pending){
+        tombIds.add(id);
+        batch.set(fbFs.doc(fbDb, 'users', uid, 'deleted', id), { id: id, at: new Date().toISOString() });
+        batch.delete(fbFs.doc(fbDb, 'users', uid, 'coins', id));
+        ops++;
+        if (ops >= 400) await flush();
+      }
+      for (const c of toPush){
+        batch.set(fbFs.doc(fbDb, 'users', uid, 'coins', c.id), c);
+        ops++;
+        if (ops >= 400) await flush();
+      }
+      await flush();
+      if (pending.length){
+        try { localStorage.removeItem(DELETED_KEY); } catch {}
+      }
+    }
+
+    coins = merged;
+    saveCoins();
+    render();
+    startSnapshot(uid);
+    if (!silent) toast('同步完成，共 ' + coins.length + ' 枚');
+  } finally {
+    syncBusy = false;
   }
-  saveCoins();
-  render();
-  startSnapshot(uid);
-  if (!silent) toast('同步完成，共 ' + coins.length + ' 枚');
 }
 
 async function cloudSet(coin){
@@ -967,6 +1022,9 @@ async function doLogout(){
   } catch {}
   if (fbUnsub){ fbUnsub(); fbUnsub = null; }
   syncUser = null;
+  snapUid = null;
+  coinsSnap = null;
+  deletedSnap = null;
   tombIds = new Set();
   updateSyncModal();
   hideModal('sync-modal');
