@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>紀念幣蒐集冊</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%23d9a441'/%3E%3Ccircle cx='32' cy='32' r='23' fill='none' stroke='%238a6420' stroke-width='3'/%3E%3Cpath d='M20 42 L32 18 L44 42' stroke='%238a6420' stroke-width='4' fill='none'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <div class="brand-coin"></div>
+    <div class="brand-text">
+      <h1>紀念幣蒐集冊</h1>
+      <span id="coin-count">0 枚</span>
+    </div>
+  </div>
+  <div class="toolbar">
+    <input id="search" type="search" placeholder="搜尋幣名、地點、國家…" autocomplete="off">
+    <div class="tool-buttons">
+      <button id="btn-sync" class="ghost">同步</button>
+      <button id="btn-add" class="primary">新增紀念幣</button>
+    </div>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button class="tab active" data-view="wall">圖鑑牆</button>
+  <button class="tab" data-view="map">地圖</button>
+</nav>
+
+<main>
+  <section id="wall-view" class="view active">
+    <div id="wall" class="wall"></div>
+    <div id="no-result" class="empty hidden">
+      <p>沒有符合搜尋條件的紀念幣</p>
+    </div>
+    <div id="empty-wall" class="empty hidden">
+      <div class="empty-disc"></div>
+      <p>蒐集冊還空空的<br>把你旅途中帶回來的每一枚紀念幣都記進來吧</p>
+      <div class="empty-actions">
+        <button id="btn-add-empty" class="primary">新增第一枚</button>
+        <button id="btn-sample" class="ghost">載入示範資料</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="map-view" class="view">
+    <div id="map"></div>
+    <div id="map-empty" class="map-hint hidden"></div>
+  </section>
+</main>
+
+<input type="file" id="photo-file" accept="image/*" hidden>
+
+<div id="detail-modal" class="modal-backdrop hidden">
+  <div class="modal detail">
+    <button class="close" data-close="detail-modal">×</button>
+    <div class="coin-flip" id="detail-flip"></div>
+    <div id="flip-hint" class="flip-hint">點擊硬幣可翻到反面</div>
+    <h2 id="detail-name"></h2>
+    <dl class="detail-rows" id="detail-rows"></dl>
+    <div class="modal-actions">
+      <button id="btn-locate" class="ghost">在地圖查看</button>
+      <span class="flex-spacer"></span>
+      <button id="btn-edit" class="primary">編輯</button>
+      <button id="btn-delete" class="danger">刪除</button>
+    </div>
+  </div>
+</div>
+
+<div id="edit-modal" class="modal-backdrop hidden">
+  <div class="modal form">
+    <button class="close" data-close="edit-modal">×</button>
+    <h2 id="form-title">新增紀念幣</h2>
+    <form id="coin-form">
+      <label>幣名 <input name="name" maxlength="60" placeholder="例：九份老街紀念幣" required></label>
+      <div class="two-col">
+        <label>國家 / 地區 <input name="country" list="country-list" placeholder="例：台灣"></label>
+        <label>取得日期 <input name="date" type="date"></label>
+      </div>
+      <label>取得地點 <span class="hint">輸入關鍵字後按搜尋，會自動標記在地圖上</span>
+        <div class="search-row">
+          <input name="location" id="location-input" placeholder="例：九份老街、京都 清水寺" autocomplete="off">
+          <button type="button" id="btn-geocode" class="ghost">搜尋</button>
+        </div>
+      </label>
+      <div id="geocode-results" class="geocode-results hidden"></div>
+
+      <div class="photo-row">
+        <div class="photo-wrap">
+          <div class="photo-slot" data-side="front"><span class="plus">+</span></div>
+          <span class="photo-tag">正面照</span>
+          <button type="button" class="photo-clear small ghost hidden" data-side="front">清除照片</button>
+        </div>
+        <div class="photo-wrap">
+          <div class="photo-slot" data-side="back"><span class="plus">+</span></div>
+          <span class="photo-tag">反面照</span>
+          <button type="button" class="photo-clear small ghost hidden" data-side="back">清除照片</button>
+        </div>
+      </div>
+
+      <div class="pin-label">位置標記 <span class="hint">搜尋自動標記後，也可以點擊地圖微調</span></div>
+      <div id="mini-map"></div>
+      <div class="pin-row">
+        <span id="pin-coords">尚未標記</span>
+        <button type="button" id="btn-clear-pin" class="small ghost">清除標記</button>
+      </div>
+
+      <div class="modal-actions">
+        <span class="flex-spacer"></span>
+        <button type="submit" class="primary">儲存</button>
+        <button type="button" id="btn-cancel" class="ghost">取消</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<datalist id="country-list">
+  <option value="台灣"></option>
+  <option value="日本"></option>
+  <option value="韓國"></option>
+  <option value="香港"></option>
+  <option value="澳門"></option>
+  <option value="中國"></option>
+  <option value="泰國"></option>
+  <option value="新加坡"></option>
+  <option value="馬來西亞"></option>
+  <option value="越南"></option>
+  <option value="美國"></option>
+  <option value="加拿大"></option>
+  <option value="英國"></option>
+  <option value="法國"></option>
+  <option value="德國"></option>
+  <option value="義大利"></option>
+  <option value="西班牙"></option>
+  <option value="荷蘭"></option>
+  <option value="瑞士"></option>
+  <option value="澳洲"></option>
+  <option value="紐西蘭"></option>
+</datalist>
+
+<div id="sync-modal" class="modal-backdrop hidden">
+  <div class="modal detail">
+    <button class="close" data-close="sync-modal">×</button>
+    <h2>雲端同步</h2>
+    <div id="sync-logged-out">
+      <p class="sync-hint">用同一組帳號登入，手機和電腦就會共用同一本蒐集冊</p>
+      <form id="login-form">
+        <label>電子郵件 <input type="email" id="login-email" required placeholder="you@example.com" autocomplete="username"></label>
+        <label>密碼 <input type="password" id="login-pass" minlength="6" required placeholder="至少 6 個字元" autocomplete="current-password"></label>
+        <div class="modal-actions">
+          <span class="flex-spacer"></span>
+          <button type="submit" class="primary">登入</button>
+          <button type="button" id="btn-create-account" class="ghost">建立新帳號</button>
+        </div>
+      </form>
+    </div>
+    <div id="sync-logged-in" class="hidden">
+      <p class="sync-hint" id="sync-account"></p>
+      <div class="modal-actions">
+        <span class="flex-spacer"></span>
+        <button type="button" id="btn-sync-now" class="primary">立即同步</button>
+        <button type="button" id="btn-logout" class="danger">登出</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<footer>資料儲存在此瀏覽器本機，清除瀏覽器資料會一併刪除蒐集紀錄</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="sync-config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

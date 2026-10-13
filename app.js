@@ -1,0 +1,853 @@
+const STORAGE_KEY = 'coin-album-v1';
+const DELETED_KEY = 'coin-album-deleted';
+const MAP_HINT_DEFAULT = '尚無位置標記：新增紀念幣時在地圖上點一下，即可標記取得地點';
+
+let coins = [];
+let currentDetailId = null;
+let editingId = null;
+let tempPhotos = { front: null, back: null };
+let pin = null;
+let sideTarget = null;
+let mainMap = null;
+let miniMap = null;
+let miniMarker = null;
+let mapLayer = null;
+let markers = {};
+let needMapRender = false;
+let toastTimer = null;
+let currentGeocodeResults = [];
+let geocodeBusy = false;
+let fbAuth = null;
+let fbFs = null;
+let fbDb = null;
+let fbUnsub = null;
+let syncUser = null;
+let tombIds = new Set();
+
+const $ = s => document.querySelector(s);
+const $$ = s => document.querySelectorAll(s);
+
+function escapeHtml(v){
+  return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function uid(){
+  return crypto.randomUUID ? crypto.randomUUID() : 'c' + Date.now() + '-' + Math.random().toString(16).slice(2);
+}
+function initial(coin){
+  return (coin.name || '').trim().charAt(0) || '?';
+}
+function fmtDate(d){
+  return d ? String(d).replace(/-/g, '/') : '';
+}
+function todayStr(){
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+function leafletReady(){
+  return typeof L !== 'undefined';
+}
+
+function loadCoins(){
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr.filter(c => c && c.id && c.name) : [];
+  } catch { return []; }
+}
+function saveCoins(){
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(coins));
+    return true;
+  } catch {
+    toast('儲存失敗：瀏覽器空間不足，建議縮小照片數量或先匯出備份');
+    return false;
+  }
+}
+
+function processImage(file){
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      const img = new Image();
+      img.onload = () => {
+        const max = 640;
+        const scale = Math.min(1, max / Math.max(img.width, img.height));
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', 0.82));
+      };
+      img.onerror = () => reject(new Error('decode'));
+      img.src = e.target.result;
+    };
+    reader.onerror = () => reject(new Error('read'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function toast(msg){
+  const t = $('#toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2400);
+}
+
+function render(){
+  updateCount();
+  renderWall();
+  if (mainMap) renderMap(); else needMapRender = true;
+}
+function updateCount(){
+  $('#coin-count').textContent = coins.length + ' 枚';
+}
+
+function renderWall(){
+  const q = ($('#search').value || '').trim().toLowerCase();
+  const list = coins
+    .filter(c => !q || [c.name, c.country, c.location].some(v => (v || '').toLowerCase().includes(q)))
+    .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) || String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  $('#wall').innerHTML = list.map(cardHtml).join('');
+  $('#empty-wall').classList.toggle('hidden', coins.length > 0);
+  $('#no-result').classList.toggle('hidden', !(q && list.length === 0 && coins.length > 0));
+}
+function cardHtml(coin){
+  const photo = coin.front
+    ? '<img src="' + coin.front + '" alt="' + escapeHtml(coin.name) + '">'
+    : '<div class="coin-placeholder"><span>' + escapeHtml(initial(coin)) + '</span></div>';
+  const meta = [coin.location || coin.country, fmtDate(coin.date)].filter(Boolean).join(' · ') || '—';
+  return '<div class="coin-card" data-id="' + coin.id + '">' +
+    '<div class="coin-ring"><div class="coin-face">' + photo + '</div></div>' +
+    '<div class="coin-name">' + escapeHtml(coin.name) + '</div>' +
+    '<div class="coin-meta">' + escapeHtml(meta) + '</div>' +
+  '</div>';
+}
+
+function openDetail(id){
+  const coin = coins.find(c => c.id === id);
+  if (!coin) return;
+  currentDetailId = id;
+  $('#detail-flip').classList.remove('flipped');
+  $('#detail-flip').innerHTML = '<div class="flip-inner">' + flipSideHtml(coin, false) + (coin.back ? flipSideHtml(coin, true) : '') + '</div>';
+  $('#flip-hint').classList.toggle('hidden', !coin.back);
+  $('#detail-name').textContent = coin.name;
+  const rows = [];
+  if (coin.country) rows.push(['國家 / 地區', coin.country]);
+  if (coin.location) rows.push(['取得地點', coin.location]);
+  if (coin.date) rows.push(['取得日期', fmtDate(coin.date)]);
+  $('#detail-rows').innerHTML = rows.map(r => '<dt>' + r[0] + '</dt><dd>' + escapeHtml(r[1]) + '</dd>').join('');
+  showModal('detail-modal');
+}
+function flipSideHtml(coin, isBack){
+  const photo = isBack ? coin.back : coin.front;
+  const inner = photo
+    ? '<img src="' + photo + '" alt="">'
+    : '<div class="coin-placeholder"><span>' + escapeHtml(initial(coin)) + '</span></div>';
+  return '<div class="flip-side' + (isBack ? ' back' : '') + '"><div class="flip-photo">' + inner + '</div></div>';
+}
+
+function deleteCurrent(){
+  const coin = coins.find(c => c.id === currentDetailId);
+  if (!coin) return;
+  if (!confirm('確定刪除「' + coin.name + '」？此操作無法復原。')) return;
+  const delId = currentDetailId;
+  coins = coins.filter(c => c.id !== delId);
+  recordLocalDelete(delId);
+  cloudDelete(delId);
+  saveCoins();
+  render();
+  hideModal('detail-modal');
+  toast('已刪除');
+}
+function locateCurrent(){
+  const coin = coins.find(c => c.id === currentDetailId);
+  if (!coin) return;
+  if (coin.lat == null || coin.lng == null){ toast('這枚紀念幣尚未標記位置'); return; }
+  hideModal('detail-modal');
+  switchView('map');
+  setTimeout(() => {
+    if (!mainMap) return;
+    mainMap.setView([coin.lat, coin.lng], 13);
+    if (markers[coin.id]) markers[coin.id].openPopup();
+  }, 150);
+}
+
+function setField(f, n, v){
+  const el = f.elements.namedItem(n);
+  if (el) el.value = v == null ? '' : v;
+}
+function openEditForm(coin){
+  editingId = coin ? coin.id : null;
+  $('#form-title').textContent = coin ? '編輯紀念幣' : '新增紀念幣';
+  const f = $('#coin-form');
+  f.reset();
+  setField(f, 'name', coin ? coin.name : '');
+  setField(f, 'country', coin ? coin.country || '' : '');
+  setField(f, 'location', coin ? coin.location || '' : '');
+  setField(f, 'date', coin ? coin.date || '' : todayStr());
+  tempPhotos = { front: coin ? coin.front || null : null, back: coin ? coin.back || null : null };
+  renderSlots();
+  pin = coin && coin.lat != null && coin.lng != null ? { lat: coin.lat, lng: coin.lng } : null;
+  currentGeocodeResults = [];
+  $('#geocode-results').classList.add('hidden');
+  showModal('edit-modal');
+  ensureMiniMap();
+}
+
+function renderSlots(){
+  ['front', 'back'].forEach(side => {
+    const slot = $('.photo-slot[data-side="' + side + '"]');
+    const clear = $('.photo-clear[data-side="' + side + '"]');
+    if (tempPhotos[side]){
+      slot.classList.add('filled');
+      slot.innerHTML = '<img src="' + tempPhotos[side] + '" alt="">';
+      clear.classList.remove('hidden');
+    } else {
+      slot.classList.remove('filled');
+      slot.innerHTML = '<span class="plus">+</span>';
+      clear.classList.add('hidden');
+    }
+  });
+}
+
+const TILE_PROVIDERS = [
+  {
+    name: '衛星影像',
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    attribution: 'Tiles &copy; Esri, Source: Esri, Maxar, Earthstar Geographics',
+    maxNativeZoom: 19
+  },
+  {
+    name: '深色地圖',
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+    attribution: 'Tiles &copy; Esri, HERE, Garmin, USGS',
+    maxNativeZoom: 16
+  },
+  {
+    name: 'CARTO',
+    url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+    attribution: '&copy; OpenStreetMap contributors, &copy; CARTO',
+    maxNativeZoom: 19
+  },
+  {
+    name: 'OpenStreetMap',
+    url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    attribution: '&copy; OpenStreetMap contributors',
+    maxNativeZoom: 19
+  }
+];
+
+function addTileLayer(map){
+  const entries = [];
+
+  TILE_PROVIDERS.forEach(p => {
+    const layer = L.tileLayer(p.url, {
+      maxZoom: 19,
+      maxNativeZoom: p.maxNativeZoom,
+      attribution: p.attribution
+    });
+    entries.push({ p, layer });
+  });
+
+  const failed = new Set();
+  let active = entries[0];
+  active.layer.addTo(map);
+
+  entries.forEach(entry => {
+    let errors = 0;
+    let exhausted = false;
+    entry.layer.on('tileerror', () => {
+      errors++;
+      if (errors >= 4){
+        failed.add(entry.p.name);
+        errors = 0;
+        const next = entries.find(e => e !== entry && !failed.has(e.p.name));
+        if (next){
+          if (active === entry){
+            map.removeLayer(entry.layer);
+            active = next;
+            next.layer.addTo(map);
+          }
+          toast('「' + entry.p.name + '」圖磚無法載入，已自動切換到「' + next.p.name + '」');
+        } else if (!exhausted){
+          exhausted = true;
+          toast('所有圖磚來源都無法載入，請確認網路連線後重新整理');
+        }
+      }
+    });
+    entry.layer.on('tileload', () => { errors = 0; exhausted = false; });
+  });
+}
+
+function ensureMiniMap(){
+  if (!leafletReady()){
+    toast('地圖元件需要網路連線才能載入');
+    return;
+  }
+  if (miniMap){
+    if (pin) miniMap.setView([pin.lat, pin.lng], 13);
+    syncPinUI();
+    setTimeout(() => miniMap.invalidateSize(), 60);
+    return;
+  }
+  miniMap = L.map('mini-map', { scrollWheelZoom: false }).setView(pin ? [pin.lat, pin.lng] : [24.5, 121.5], pin ? 13 : 5);
+  addTileLayer(miniMap);
+  miniMap.on('click', ev => setPin(ev.latlng.lat, ev.latlng.lng));
+  syncPinUI();
+  setTimeout(() => miniMap.invalidateSize(), 60);
+}
+function setPin(lat, lng){
+  pin = { lat, lng };
+  syncPinUI();
+}
+function clearPin(){
+  pin = null;
+  syncPinUI();
+}
+function syncPinUI(){
+  if (pin){
+    $('#pin-coords').textContent = pin.lat.toFixed(4) + ', ' + pin.lng.toFixed(4);
+    if (miniMap){
+      if (miniMarker) miniMarker.setLatLng([pin.lat, pin.lng]);
+      else miniMarker = L.marker([pin.lat, pin.lng], { icon: pinIcon() }).addTo(miniMap);
+    }
+  } else {
+    $('#pin-coords').textContent = '尚未標記';
+    if (miniMap && miniMarker){
+      miniMap.removeLayer(miniMarker);
+      miniMarker = null;
+    }
+  }
+}
+function pinIcon(){
+  return L.divIcon({ className: 'coin-marker', html: '<div class="pin-dot"></div>', iconSize: [18, 18], iconAnchor: [9, 9] });
+}
+
+const COUNTRY_ZH = {
+  Taiwan: '台灣', TWN: '台灣', TW: '台灣',
+  Japan: '日本', JPN: '日本', JP: '日本',
+  'South Korea': '南韓', Korea: '南韓', KOR: '南韓', KR: '南韓',
+  China: '中國', CHN: '中國', CN: '中國',
+  'Hong Kong': '香港', HKG: '香港', HK: '香港',
+  Macau: '澳門', Macao: '澳門', MAC: '澳門', MO: '澳門',
+  Thailand: '泰國', THA: '泰國', TH: '泰國',
+  Singapore: '新加坡', SGP: '新加坡', SG: '新加坡',
+  Malaysia: '馬來西亞', MYS: '馬來西亞', MY: '馬來西亞',
+  Vietnam: '越南', VNM: '越南', VN: '越南',
+  Indonesia: '印尼', IDN: '印尼', ID: '印尼',
+  Philippines: '菲律賓', PHL: '菲律賓', PH: '菲律賓',
+  'United States': '美國', USA: '美國', US: '美國',
+  Canada: '加拿大', CAN: '加拿大', CA: '加拿大',
+  'United Kingdom': '英國', GBR: '英國', GB: '英國',
+  France: '法國', FRA: '法國', FR: '法國',
+  Germany: '德國', DEU: '德國', DE: '德國',
+  Italy: '義大利', ITA: '義大利', IT: '義大利',
+  Spain: '西班牙', ESP: '西班牙', ES: '西班牙',
+  Netherlands: '荷蘭', NLD: '荷蘭', NL: '荷蘭',
+  Switzerland: '瑞士', CHE: '瑞士', CH: '瑞士',
+  Australia: '澳洲', AUS: '澳洲', AU: '澳洲',
+  'New Zealand': '紐西蘭', NZL: '紐西蘭', NZ: '紐西蘭'
+};
+
+function countryZh(name){
+  return COUNTRY_ZH[name] || name;
+}
+
+async function esriGeocode(q){
+  const url = 'https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&maxLocations=6&outFields=Country&singleLine=' + encodeURIComponent(q);
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('esri ' + res.status);
+  const data = await res.json();
+  return (data.candidates || []).map(c => ({
+    label: c.address,
+    lat: c.location.y,
+    lng: c.location.x,
+    country: (c.attributes && c.attributes.Country) || ''
+  }));
+}
+
+async function photonGeocode(q){
+  const res = await fetch('https://photon.komoot.io/api/?limit=6&q=' + encodeURIComponent(q));
+  if (!res.ok) throw new Error('photon ' + res.status);
+  const data = await res.json();
+  return (data.features || []).map(f => {
+    const p = f.properties || {};
+    return {
+      label: [p.name, p.city, p.state, p.country].filter(Boolean).join(', '),
+      lat: f.geometry.coordinates[1],
+      lng: f.geometry.coordinates[0],
+      country: p.country || ''
+    };
+  });
+}
+
+async function nominatimGeocode(q){
+  const res = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=6&q=' + encodeURIComponent(q));
+  if (!res.ok) throw new Error('nominatim ' + res.status);
+  const data = await res.json();
+  return data.map(r => ({
+    label: r.display_name,
+    lat: parseFloat(r.lat),
+    lng: parseFloat(r.lon),
+    country: ''
+  }));
+}
+
+async function geocodeQuery(q){
+  const providers = [esriGeocode, photonGeocode, nominatimGeocode];
+  for (const fn of providers){
+    try {
+      const list = await fn(q);
+      if (list.length) return list;
+    } catch {}
+  }
+  return [];
+}
+
+async function runGeocode(){
+  if (geocodeBusy) return;
+  const input = $('#location-input');
+  const q = (input.value || '').trim();
+  if (!q){ toast('請先輸入要搜尋的地點'); return; }
+  geocodeBusy = true;
+  const btn = $('#btn-geocode');
+  btn.disabled = true;
+  btn.textContent = '搜尋中…';
+  const list = await geocodeQuery(q);
+  btn.disabled = false;
+  btn.textContent = '搜尋';
+  geocodeBusy = false;
+  if (!list.length){ toast('找不到這個地點，換個關鍵字試試'); return; }
+  currentGeocodeResults = list;
+  renderGeocodeResults(list);
+}
+
+function renderGeocodeResults(list){
+  const box = $('#geocode-results');
+  box.innerHTML = list.map((r, i) =>
+    '<button type="button" class="geocode-item" data-i="' + i + '">' +
+      '<span class="gi-label">' + escapeHtml(r.label) + '</span>' +
+      (r.country ? '<span class="gi-sub">' + escapeHtml(countryZh(r.country)) + '</span>' : '') +
+    '</button>'
+  ).join('');
+  box.classList.remove('hidden');
+}
+
+function applyGeocodeResult(r){
+  const f = $('#coin-form');
+  setField(f, 'location', r.label);
+  setPin(r.lat, r.lng);
+  if (miniMap) miniMap.setView([r.lat, r.lng], 15);
+  const countryInput = f.elements.namedItem('country');
+  if (r.country && countryInput && !countryInput.value.trim()){
+    setField(f, 'country', countryZh(r.country));
+  }
+  $('#geocode-results').classList.add('hidden');
+}
+
+function submitForm(e){
+  e.preventDefault();
+  const f = $('#coin-form');
+  const fd = new FormData(f);
+  const name = String(fd.get('name') || '').trim();
+  if (!name){ toast('請輸入幣名'); return; }
+  const data = {
+    name,
+    country: String(fd.get('country') || '').trim(),
+    location: String(fd.get('location') || '').trim(),
+    date: String(fd.get('date') || '').trim(),
+    front: tempPhotos.front,
+    back: tempPhotos.back,
+    lat: pin ? pin.lat : null,
+    lng: pin ? pin.lng : null
+  };
+  const now = new Date().toISOString();
+  let saved;
+  if (editingId){
+    const i = coins.findIndex(c => c.id === editingId);
+    if (i >= 0){
+      coins[i] = { id: coins[i].id, createdAt: coins[i].createdAt, updatedAt: now, ...data };
+      saved = coins[i];
+    }
+  } else {
+    saved = { id: uid(), createdAt: now, updatedAt: now, ...data };
+    coins.push(saved);
+  }
+  if (!saveCoins()) return;
+  render();
+  hideModal('edit-modal');
+  cloudSet(saved);
+  toast(editingId ? '已更新' : '已新增 1 枚紀念幣');
+}
+
+function ensureMainMap(){
+  if (mainMap) return;
+  if (!leafletReady()){
+    const hint = $('#map-empty');
+    hint.textContent = '地圖元件需要網路連線才能載入，圖鑑牆與資料儲存不受影響';
+    hint.classList.remove('hidden');
+    return;
+  }
+  mainMap = L.map('map', { worldCopyJump: true }).setView([24.5, 121.5], 6);
+  addTileLayer(mainMap);
+  mapLayer = L.layerGroup().addTo(mainMap);
+  renderMap();
+}
+function renderMap(){
+  if (!mainMap){ needMapRender = true; return; }
+  mapLayer.clearLayers();
+  markers = {};
+  const pts = [];
+  coins.forEach(coin => {
+    if (coin.lat == null || coin.lng == null) return;
+    const m = L.marker([coin.lat, coin.lng], { icon: markerIcon(coin) }).addTo(mapLayer);
+    m.bindPopup(popupHtml(coin));
+    markers[coin.id] = m;
+    pts.push([coin.lat, coin.lng]);
+  });
+  const hint = $('#map-empty');
+  hint.textContent = MAP_HINT_DEFAULT;
+  hint.classList.toggle('hidden', pts.length > 0);
+  if (pts.length === 1) mainMap.setView(pts[0], 8);
+  else if (pts.length > 1) mainMap.fitBounds(L.latLngBounds(pts).pad(0.25));
+}
+function markerIcon(coin){
+  const style = coin.front ? 'background-image:url(' + coin.front + ');' : '';
+  const label = coin.front ? '' : '<span>' + escapeHtml(initial(coin)) + '</span>';
+  return L.divIcon({
+    className: 'coin-marker',
+    html: '<div class="coin-marker-inner" style="' + style + '">' + label + '</div>',
+    iconSize: [34, 34],
+    iconAnchor: [17, 17],
+    popupAnchor: [0, -14]
+  });
+}
+function popupHtml(coin){
+  const img = coin.front
+    ? '<img src="' + coin.front + '" alt="">'
+    : '<div class="coin-placeholder"><span>' + escapeHtml(initial(coin)) + '</span></div>';
+  const meta = [coin.location || coin.country, fmtDate(coin.date)].filter(Boolean).join(' · ');
+  return '<div class="popup">' +
+    '<div class="popup-img">' + img + '</div>' +
+    '<div class="popup-name">' + escapeHtml(coin.name) + '</div>' +
+    '<div class="popup-meta">' + escapeHtml(meta) + '</div>' +
+    '<button class="popup-btn" onclick="openDetail(\'' + coin.id + '\')">查看</button>' +
+  '</div>';
+}
+
+function switchView(v){
+  $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.view === v));
+  $('#wall-view').classList.toggle('active', v === 'wall');
+  $('#map-view').classList.toggle('active', v === 'map');
+  if (v === 'map'){
+    ensureMainMap();
+    if (needMapRender){ renderMap(); needMapRender = false; }
+    setTimeout(() => mainMap && mainMap.invalidateSize(), 60);
+  }
+}
+
+function showModal(id){
+  $('#' + id).classList.remove('hidden');
+}
+function hideModal(id){
+  $('#' + id).classList.add('hidden');
+}
+function closeEditModal(){
+  hideModal('edit-modal');
+}
+
+function syncConfigured(){
+  const c = window.FIREBASE_CONFIG;
+  return !!(c && c.projectId && c.apiKey && c.projectId.indexOf('貼上') === -1 && c.apiKey.indexOf('貼上') === -1);
+}
+
+async function loadFirebase(){
+  if (fbDb) return;
+  const v = '10.12.2';
+  const [appMod, authMod, fsMod] = await Promise.all([
+    import('https://www.gstatic.com/firebasejs/' + v + '/firebase-app.js'),
+    import('https://www.gstatic.com/firebasejs/' + v + '/firebase-auth.js'),
+    import('https://www.gstatic.com/firebasejs/' + v + '/firebase-firestore.js')
+  ]);
+  const app = appMod.initializeApp(window.FIREBASE_CONFIG);
+  fbAuth = authMod;
+  fbFs = fsMod;
+  fbDb = fsMod.getFirestore(app);
+}
+
+function coinTime(c){
+  return String(c.updatedAt || c.createdAt || '');
+}
+function mergeCoins(local, cloud){
+  const map = new Map();
+  [].concat(local, cloud).forEach(c => {
+    const prev = map.get(c.id);
+    if (!prev || coinTime(c) > coinTime(prev)) map.set(c.id, c);
+  });
+  return Array.from(map.values());
+}
+function coinsSignature(list){
+  return JSON.stringify((list || []).map(c => [c.id, coinTime(c)]).sort());
+}
+
+function loadPendingDeletes(){
+  try {
+    const arr = JSON.parse(localStorage.getItem(DELETED_KEY) || '[]');
+    return Array.isArray(arr) ? arr : [];
+  } catch { return []; }
+}
+function recordLocalDelete(id){
+  const list = loadPendingDeletes();
+  if (list.indexOf(id) === -1){
+    list.push(id);
+    try { localStorage.setItem(DELETED_KEY, JSON.stringify(list)); } catch {}
+  }
+}
+
+function applyCloudState(cloud){
+  let merged = coins;
+  if (cloud) merged = mergeCoins(coins, cloud);
+  merged = merged.filter(c => !tombIds.has(c.id));
+  if (coinsSignature(merged) !== coinsSignature(coins)){
+    coins = merged;
+    saveCoins();
+    render();
+  }
+}
+
+function startSnapshot(uid){
+  if (fbUnsub){ fbUnsub(); fbUnsub = null; }
+  const unsubCoins = fbFs.onSnapshot(fbFs.collection(fbDb, 'users', uid, 'coins'), snap => {
+    const cloud = snap.docs.map(d => d.data()).filter(c => c && c.id && c.name);
+    applyCloudState(cloud);
+  }, () => {});
+  const unsubDeleted = fbFs.onSnapshot(fbFs.collection(fbDb, 'users', uid, 'deleted'), snap => {
+    tombIds = new Set(snap.docs.map(d => d.id));
+    applyCloudState(null);
+  }, () => {});
+  fbUnsub = () => { unsubCoins(); unsubDeleted(); };
+}
+
+async function syncNow(silent){
+  if (!syncUser) return;
+  const uid = syncUser.uid;
+  const cSnap = await fbFs.getDocs(fbFs.collection(fbDb, 'users', uid, 'coins'));
+  const dSnap = await fbFs.getDocs(fbFs.collection(fbDb, 'users', uid, 'deleted'));
+  const cloud = cSnap.docs.map(d => d.data()).filter(c => c && c.id && c.name);
+  tombIds = new Set(dSnap.docs.map(d => d.id));
+
+  const pending = loadPendingDeletes();
+  for (const id of pending){
+    tombIds.add(id);
+    await fbFs.setDoc(fbFs.doc(fbDb, 'users', uid, 'deleted', id), { id: id, at: new Date().toISOString() });
+    await fbFs.deleteDoc(fbFs.doc(fbDb, 'users', uid, 'coins', id));
+  }
+  if (pending.length){
+    try { localStorage.removeItem(DELETED_KEY); } catch {}
+  }
+
+  coins = mergeCoins(coins, cloud).filter(c => !tombIds.has(c.id));
+  for (const c of coins){
+    if (tombIds.has(c.id)) continue;
+    await fbFs.setDoc(fbFs.doc(fbDb, 'users', uid, 'coins', c.id), c);
+  }
+  saveCoins();
+  render();
+  startSnapshot(uid);
+  if (!silent) toast('同步完成，共 ' + coins.length + ' 枚');
+}
+
+async function cloudSet(coin){
+  if (!syncUser || !fbDb) return;
+  try {
+    await fbFs.setDoc(fbFs.doc(fbDb, 'users', syncUser.uid, 'coins', coin.id), coin);
+  } catch {}
+}
+async function cloudDelete(id){
+  if (!syncUser || !fbDb) return;
+  try {
+    await fbFs.setDoc(fbFs.doc(fbDb, 'users', syncUser.uid, 'deleted', id), { id: id, at: new Date().toISOString() });
+    await fbFs.deleteDoc(fbFs.doc(fbDb, 'users', syncUser.uid, 'coins', id));
+  } catch {}
+}
+
+function syncErrMsg(err, isCreate){
+  const code = err && err.code ? err.code : '';
+  if (code === 'auth/email-already-in-use') return '此 Email 已註冊過，請改用登入';
+  if (code === 'auth/invalid-credential' || code === 'auth/wrong-password' || code === 'auth/user-not-found') return 'Email 或密碼不正確';
+  if (code === 'auth/weak-password') return '密碼至少需要 6 個字元';
+  if (code === 'auth/invalid-email') return 'Email 格式不正確';
+  if (code === 'auth/too-many-requests') return '嘗試次數過多，請稍後再試';
+  if (code === 'auth/unauthorized-domain') return '此網域尚未加入 Firebase 授權網域，詳見部署說明';
+  if (code === 'auth/network-request-failed' || code === 'auth/internal-error') return '網路連線異常，請確認網路';
+  return isCreate ? '建立帳號失敗，請稍後再試' : '登入失敗，請稍後再試';
+}
+
+function updateSyncModal(){
+  if (syncUser){
+    $('#sync-logged-out').classList.add('hidden');
+    $('#sync-logged-in').classList.remove('hidden');
+    $('#sync-account').textContent = '已登入：' + (syncUser.email || '') + '，變更會自動同步到所有裝置';
+  } else {
+    $('#sync-logged-out').classList.remove('hidden');
+    $('#sync-logged-in').classList.add('hidden');
+  }
+}
+
+async function doLogin(isCreate){
+  const email = $('#login-email').value.trim();
+  const pass = $('#login-pass').value;
+  if (!email || !pass){ toast('請輸入 Email 與密碼'); return; }
+  try {
+    await loadFirebase();
+    const auth = fbAuth.getAuth();
+    if (isCreate) await fbAuth.createUserWithEmailAndPassword(auth, email, pass);
+    else await fbAuth.signInWithEmailAndPassword(auth, email, pass);
+    syncUser = auth.currentUser;
+    $('#login-pass').value = '';
+    updateSyncModal();
+    hideModal('sync-modal');
+    await syncNow();
+  } catch (err){
+    toast(syncErrMsg(err, isCreate));
+  }
+}
+
+async function doLogout(){
+  try {
+    if (fbAuth) await fbAuth.signOut(fbAuth.getAuth());
+  } catch {}
+  if (fbUnsub){ fbUnsub(); fbUnsub = null; }
+  syncUser = null;
+  tombIds = new Set();
+  updateSyncModal();
+  hideModal('sync-modal');
+  toast('已登出，此裝置改為僅本機記錄');
+}
+
+async function initSync(){
+  if (!syncConfigured()) return;
+  try {
+    await loadFirebase();
+    fbAuth.onAuthStateChanged(fbAuth.getAuth(), user => {
+      syncUser = user;
+      if (user) syncNow(true).catch(() => {});
+    });
+  } catch {}
+}
+
+function loadSample(){
+  const base = [
+    ['九份老街紀念幣', '台灣', '新北市瑞芳區 九份老街', '2025-11-02', 25.1087, 121.8445],
+    ['台北 101 紀念幣', '台灣', '台北 101 觀景台', '2026-01-15', 25.0338, 121.5645],
+    ['清水寺紀念幣', '日本', '京都 清水寺', '2026-04-08', 34.9949, 135.7850],
+    ['艾菲爾鐵塔紀念幣', '法國', '巴黎 艾菲爾鐵塔', '2026-07-20', 48.8584, 2.2945]
+  ];
+  base.forEach(a => coins.push({
+    id: uid(),
+    createdAt: new Date().toISOString(),
+    name: a[0], country: a[1], location: a[2], date: a[3],
+    front: null, back: null,
+    lat: a[4], lng: a[5]
+  }));
+  saveCoins();
+  render();
+  toast('已載入 4 枚示範紀念幣，可自行編輯或刪除');
+}
+
+async function onPhotoFile(e){
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file || !sideTarget) return;
+  try {
+    tempPhotos[sideTarget] = await processImage(file);
+    renderSlots();
+    toast('照片已加入');
+  } catch {
+    toast('圖片讀取失敗，請換一張試試');
+  }
+}
+
+function init(){
+  coins = loadCoins();
+
+  $('#btn-add').addEventListener('click', () => openEditForm(null));
+  $('#btn-add-empty').addEventListener('click', () => openEditForm(null));
+  $('#btn-sample').addEventListener('click', loadSample);
+  $('#search').addEventListener('input', renderWall);
+  $$('.tab').forEach(t => t.addEventListener('click', () => switchView(t.dataset.view)));
+
+  $('#wall').addEventListener('click', e => {
+    const card = e.target.closest('.coin-card');
+    if (card) openDetail(card.dataset.id);
+  });
+
+  $('#detail-flip').addEventListener('click', () => {
+    const coin = coins.find(c => c.id === currentDetailId);
+    if (coin && coin.back) $('#detail-flip').classList.toggle('flipped');
+  });
+  $('#btn-edit').addEventListener('click', () => {
+    const coin = coins.find(c => c.id === currentDetailId);
+    if (coin) openEditForm(coin);
+  });
+  $('#btn-delete').addEventListener('click', deleteCurrent);
+  $('#btn-locate').addEventListener('click', locateCurrent);
+
+  $('#coin-form').addEventListener('submit', submitForm);
+  $('#btn-cancel').addEventListener('click', closeEditModal);
+  $('#btn-clear-pin').addEventListener('click', clearPin);
+  $('#btn-sync').addEventListener('click', () => {
+    if (!syncConfigured()){ toast('尚未設定雲端同步：請在 sync-config.js 填入 Firebase 設定'); return; }
+    updateSyncModal();
+    showModal('sync-modal');
+  });
+  $('#login-form').addEventListener('submit', e => { e.preventDefault(); doLogin(false); });
+  $('#btn-create-account').addEventListener('click', () => doLogin(true));
+  $('#btn-sync-now').addEventListener('click', async () => {
+    const btn = $('#btn-sync-now');
+    btn.disabled = true;
+    btn.textContent = '同步中…';
+    try { await syncNow(); } catch { toast('同步失敗，請確認網路連線'); }
+    btn.disabled = false;
+    btn.textContent = '立即同步';
+  });
+  $('#btn-logout').addEventListener('click', doLogout);
+  $('#btn-geocode').addEventListener('click', runGeocode);
+  $('#location-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter'){ e.preventDefault(); runGeocode(); }
+  });
+  $('#geocode-results').addEventListener('click', e => {
+    const item = e.target.closest('.geocode-item');
+    if (!item) return;
+    const r = currentGeocodeResults[parseInt(item.dataset.i, 10)];
+    if (r) applyGeocodeResult(r);
+  });
+
+  $('#photo-file').addEventListener('change', onPhotoFile);
+
+  $$('.photo-slot').forEach(slot => slot.addEventListener('click', () => {
+    sideTarget = slot.dataset.side;
+    $('#photo-file').click();
+  }));
+  $$('.photo-clear').forEach(btn => btn.addEventListener('click', () => {
+    tempPhotos[btn.dataset.side] = null;
+    renderSlots();
+  }));
+
+  $$('.modal-backdrop').forEach(b => {
+    b.addEventListener('click', e => { if (e.target === b) hideModal(b.id); });
+  });
+  $$('[data-close]').forEach(btn => btn.addEventListener('click', () => hideModal(btn.dataset.close)));
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape'){
+      $$('.modal-backdrop').forEach(m => m.classList.add('hidden'));
+      $('#geocode-results').classList.add('hidden');
+    }
+  });
+
+  render();
+  initSync();
+}
+init();
