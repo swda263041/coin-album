@@ -824,7 +824,11 @@ async function loadFirebase(){
   const app = appMod.initializeApp(window.FIREBASE_CONFIG);
   fbAuth = authMod;
   fbFs = fsMod;
-  fbDb = fsMod.getFirestore(app);
+  try {
+    fbDb = fsMod.initializeFirestore(app, { localCache: fsMod.persistentLocalCache() });
+  } catch {
+    fbDb = fsMod.getFirestore(app);
+  }
 }
 
 function coinTime(c){
@@ -920,7 +924,13 @@ function setSyncProgress(text, pct){
 
 async function syncNow(silent){
   if (!syncUser) return;
-  if (syncBusy){ if (!silent) toast('同步進行中，請稍候'); return; }
+  if (syncBusy){
+    const wait0 = Date.now();
+    while (syncBusy && Date.now() - wait0 < 30000){
+      await new Promise(r => setTimeout(r, 250));
+    }
+    if (syncBusy){ if (!silent) toast('同步忙碌中，請稍後再試'); return; }
+  }
   syncBusy = true;
   const ui = !$('#sync-modal').classList.contains('hidden');
   const t0 = Date.now();
@@ -928,12 +938,22 @@ async function syncNow(silent){
   try {
     const uid = syncUser.uid;
     phase('連線雲端中…', null);
-    let cloud;
+    startSnapshot(uid);
+    let cloud = null;
     if (coinsSnap && !coinsSnap.metadata.fromCache){
       cloud = coinsSnap.docs.map(d => d.data()).filter(c => c && c.id && c.name);
     } else {
-      const cSnap = await fbFs.getDocs(fbFs.collection(fbDb, 'users', uid, 'coins'));
-      cloud = cSnap.docs.map(d => d.data()).filter(c => c && c.id && c.name);
+      const fresh0 = Date.now();
+      while (!cloud && Date.now() - fresh0 < 10000){
+        await new Promise(r => setTimeout(r, 150));
+        if (coinsSnap && !coinsSnap.metadata.fromCache){
+          cloud = coinsSnap.docs.map(d => d.data()).filter(c => c && c.id && c.name);
+        }
+      }
+      if (!cloud){
+        const cSnap = await fbFs.getDocs(fbFs.collection(fbDb, 'users', uid, 'coins'));
+        cloud = cSnap.docs.map(d => d.data()).filter(c => c && c.id && c.name);
+      }
     }
     phase('下載刪除紀錄…', null);
     let tombList;
