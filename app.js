@@ -3,6 +3,7 @@ const DELETED_KEY = 'coin-album-deleted';
 const MAP_HINT_DEFAULT = '尚無位置標記：新增紀念幣時在地圖上點一下，即可標記取得地點';
 
 let coins = [];
+let db = null;
 let currentDetailId = null;
 let editingId = null;
 let tempPhotos = { front: null, back: null };
@@ -47,19 +48,79 @@ function leafletReady(){
   return typeof L !== 'undefined';
 }
 
-function loadCoins(){
+function openDB(){
+  return new Promise(resolve => {
+    if (!window.indexedDB){ resolve(null); return; }
+    let settled = false;
+    const done = v => { if (!settled){ settled = true; resolve(v); } };
+    const timer = setTimeout(() => done(null), 2500);
+    let req;
+    try { req = indexedDB.open('coin-album', 1); } catch { clearTimeout(timer); done(null); return; }
+    req.onupgradeneeded = e => {
+      const d = e.target.result;
+      if (!d.objectStoreNames.contains('kv')) d.createObjectStore('kv');
+    };
+    req.onsuccess = e => { clearTimeout(timer); done(e.target.result || null); };
+    req.onerror = () => { clearTimeout(timer); done(null); };
+    req.onblocked = () => { clearTimeout(timer); done(null); };
+  });
+}
+
+function idbGet(key){
+  return new Promise(resolve => {
+    if (!db){ resolve(undefined); return; }
+    try {
+      const r = db.transaction('kv', 'readonly').objectStore('kv').get(key);
+      r.onsuccess = () => resolve(r.result);
+      r.onerror = () => resolve(undefined);
+    } catch { resolve(undefined); }
+  });
+}
+
+function idbSet(key, val){
+  return new Promise((resolve, reject) => {
+    if (!db){ reject(new Error('nodb')); return; }
+    try {
+      const r = db.transaction('kv', 'readwrite').objectStore('kv').put(val, key);
+      r.onsuccess = () => resolve();
+      r.onerror = () => reject(r.error);
+    } catch (e) { reject(e); }
+  });
+}
+
+function loadCoinsLegacy(){
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     const arr = raw ? JSON.parse(raw) : [];
     return Array.isArray(arr) ? arr.filter(c => c && c.id && c.name) : [];
   } catch { return []; }
 }
+
+async function initStorage(){
+  db = await openDB();
+  const stored = await idbGet('coins');
+  let list = Array.isArray(stored) ? stored.filter(c => c && c.id && c.name) : [];
+  const legacy = loadCoinsLegacy();
+  if (legacy.length){
+    list = mergeCoins(legacy, list);
+    if (db){
+      try { localStorage.removeItem(STORAGE_KEY); } catch {}
+      idbSet('coins', list).catch(() => {});
+    }
+  }
+  coins = list;
+}
+
 function saveCoins(){
+  if (db){
+    idbSet('coins', coins).catch(() => toast('儲存失敗：瀏覽器儲存空間異常，請稍後再試'));
+    return true;
+  }
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(coins));
     return true;
   } catch {
-    toast('儲存失敗：瀏覽器空間不足，建議縮小照片數量或先匯出備份');
+    toast('儲存失敗：瀏覽器空間不足，建議改用有雲端同步的瀏覽器環境');
     return false;
   }
 }
@@ -607,7 +668,7 @@ function submitForm(e){
     saved = { id: uid(), createdAt: now, updatedAt: now, ...data };
     coins.push(saved);
   }
-  if (!saveCoins()) return;
+  saveCoins();
   render();
   hideModal('edit-modal');
   cloudSet(saved);
@@ -940,8 +1001,8 @@ async function onPhotoFile(e){
   }
 }
 
-function init(){
-  coins = loadCoins();
+async function init(){
+  await initStorage();
 
   $('#btn-add').addEventListener('click', () => openEditForm(null));
   $('#btn-add-empty').addEventListener('click', () => openEditForm(null));
