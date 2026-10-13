@@ -614,6 +614,32 @@ function submitForm(e){
   toast(editingId ? '已更新' : '已新增 1 枚紀念幣');
 }
 
+function spiderfyPositions(count, center){
+  const res = [];
+  res.length = count;
+  if (count < 9){
+    const r = Math.max(25 * (2 + count) / (2 * Math.PI), 58);
+    const step = 2 * Math.PI / count;
+    for (let i = 0; i < count; i++){
+      const a = i * step;
+      res[i] = new L.Point(center.x + r * Math.cos(a), center.y + r * Math.sin(a))._round();
+    }
+  } else {
+    let r = 58;
+    const separation = 34;
+    const growth = 5 * 2 * Math.PI;
+    let angle = 0;
+    for (let i = count; i >= 0; i--){
+      if (i < count){
+        res[i] = new L.Point(center.x + r * Math.cos(angle), center.y + r * Math.sin(angle))._round();
+      }
+      angle += separation / r + i * 0.0005;
+      r += growth / angle;
+    }
+  }
+  return res;
+}
+
 function ensureMainMap(){
   if (mainMap) return;
   if (!leafletReady()){
@@ -628,7 +654,7 @@ function ensureMainMap(){
     mapLayer = L.markerClusterGroup({
       showCoverageOnHover: false,
       maxClusterRadius: 45,
-      spiderfyDistanceMultiplier: 1.2,
+      spiderfyShapePositions: spiderfyPositions,
       spiderLegPolylineOptions: { weight: 2, color: '#d9a441', opacity: 0.6 }
     }).addTo(mainMap);
   } else {
@@ -652,7 +678,10 @@ function renderMap(){
   hint.textContent = MAP_HINT_DEFAULT;
   hint.classList.toggle('hidden', pts.length > 0);
   if (pts.length === 1) mainMap.setView(pts[0], 8);
-  else if (pts.length > 1) mainMap.fitBounds(L.latLngBounds(pts).pad(0.25));
+  else if (pts.length > 1){
+    const b = L.latLngBounds(pts).pad(0.25);
+    mainMap.setView(b.getCenter(), Math.min(mainMap.getBoundsZoom(b), 16));
+  }
 }
 function markerIcon(coin){
   const style = coin.front ? 'background-image:url(' + coin.front + ');' : '';
