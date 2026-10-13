@@ -53,7 +53,7 @@ function openDB(){
     if (!window.indexedDB){ resolve(null); return; }
     let settled = false;
     const done = v => { if (!settled){ settled = true; resolve(v); } };
-    const timer = setTimeout(() => done(null), 2500);
+    const timer = setTimeout(() => done(null), 5000);
     let req;
     try { req = indexedDB.open('coin-album', 1); } catch { clearTimeout(timer); done(null); return; }
     req.onupgradeneeded = e => {
@@ -104,23 +104,38 @@ async function initStorage(){
   if (legacy.length){
     list = mergeCoins(legacy, list);
     if (db){
-      try { localStorage.removeItem(STORAGE_KEY); } catch {}
-      idbSet('coins', list).catch(() => {});
+      try {
+        await idbSet('coins', list);
+        try { localStorage.removeItem(STORAGE_KEY); } catch {}
+      } catch {
+        db = null;
+      }
     }
   }
   coins = list;
+  updateStorageMode();
 }
 
-function saveCoins(){
+function updateStorageMode(){
+  const el = $('#storage-mode');
+  if (el) el.textContent = db ? '本機儲存：IndexedDB ・ ' : '本機儲存：localStorage ・ ';
+}
+
+async function saveCoins(){
   if (db){
-    idbSet('coins', coins).catch(() => toast('儲存失敗：瀏覽器儲存空間異常，請稍後再試'));
-    return true;
+    try {
+      await idbSet('coins', coins);
+      return true;
+    } catch (err) {
+      toast('儲存失敗（' + (err && err.name ? err.name : '未知錯誤') + '），資料仍受雲端同步保護');
+      return false;
+    }
   }
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(coins));
     return true;
   } catch {
-    toast('儲存失敗：瀏覽器空間不足，建議改用有雲端同步的瀏覽器環境');
+    toast('儲存失敗：瀏覽器空間不足（localStorage 模式）');
     return false;
   }
 }
@@ -640,7 +655,7 @@ function applyGeocodeResult(r){
   $('#geocode-results').classList.add('hidden');
 }
 
-function submitForm(e){
+async function submitForm(e){
   e.preventDefault();
   const f = $('#coin-form');
   const fd = new FormData(f);
@@ -668,11 +683,11 @@ function submitForm(e){
     saved = { id: uid(), createdAt: now, updatedAt: now, ...data };
     coins.push(saved);
   }
-  saveCoins();
+  const savedOk = await saveCoins();
   render();
   hideModal('edit-modal');
   cloudSet(saved);
-  toast(editingId ? '已更新' : '已新增 1 枚紀念幣');
+  if (savedOk) toast(editingId ? '已更新' : '已新增 1 枚紀念幣');
 }
 
 function spiderfyPositions(count, center){
@@ -1001,9 +1016,7 @@ async function onPhotoFile(e){
   }
 }
 
-async function init(){
-  await initStorage();
-
+function bindEvents(){
   $('#btn-add').addEventListener('click', () => openEditForm(null));
   $('#btn-add-empty').addEventListener('click', () => openEditForm(null));
   $('#btn-sample').addEventListener('click', loadSample);
@@ -1078,6 +1091,11 @@ async function init(){
     }
   });
 
+}
+
+async function init(){
+  bindEvents();
+  await initStorage();
   render();
   initSync();
 }
