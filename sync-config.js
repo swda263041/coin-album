@@ -1,8 +1,8 @@
 window.FIREBASE_CONFIG = {
-  apiKey: "貼上你的apiKey",
-  authDomain: "貼上你的專案.firebaseapp.com",
-  projectId: "貼上你的專案ID",
-  storageBucket: "貼上你的專案.appspot.com",
-  messagingSenderId: "貼上數字",
-  appId: "貼上appId"
+  apiKey: "AIzaSyBmRXX8H6Ms_FH0vODTxQbyhL1sRQ-yoDA",
+  authDomain: "coin-album-20c7a.firebaseapp.com",
+  projectId: "coin-album-20c7a",
+  storageBucket: "coin-album-20c7a.firebasestorage.app",
+  messagingSenderId: "620395458722",
+  appId: "1:620395458722:web:1c1af1013096396f81e7fb"
 };
